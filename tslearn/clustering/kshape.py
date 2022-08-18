@@ -8,7 +8,7 @@ from sklearn.utils import check_array
 from sklearn.utils.validation import check_is_fitted
 from tslearn.preprocessing import TimeSeriesScalerMeanVariance
 from tslearn.utils import to_time_series_dataset, check_dims
-from tslearn.metrics import cdist_normalized_cc, y_shifted_sbd_vec
+#from tslearn.metrics import cdist_normalized_cc, y_shifted_sbd_vec
 from tslearn.bases import BaseModelPackage, TimeSeriesBaseEstimator
 
 from .utils import (TimeSeriesCentroidBasedClusteringMixin,
@@ -289,4 +289,162 @@ class KShape(ClusterMixin, TimeSeriesCentroidBasedClusteringMixin,
         X_ = TimeSeriesScalerMeanVariance(mu=0., std=1.).fit_transform(X_)
         dists = self._cross_dists(X_)
         return dists.argmin(axis=1)
-        
+
+# # Numba testing
+
+# from numba import jit, objmode, njit, prange
+# #numba.set_num_threads(2)
+
+# @jit()
+# def normalized_cc(s1, s2, norm1=-1., norm2=-1.):
+#     #assert s1.shape[1] == s2.shape[1]
+#     sz = s1.shape[0] #~100
+#     # Compute fft size based on tip from https://stackoverflow.com/questions/14267555/
+#     #fft_sz = 1 << (2 * sz - 1).bit_length()
+#     fft_sz = 1 << numpy.int(2**(numpy.ceil(numpy.log2(2*sz-1))))# bit_length doesn't work with numba
+                                                                
+#     denom = 0.
+    
+
+#     if norm1 < 0.:
+#         norm1 = numpy.linalg.norm(s1)
+#     if norm2 < 0.:
+#         norm2 = numpy.linalg.norm(s2)
+
+#     denom = norm1 * norm2
+#     if denom < 1e-9:  # To avoid NaNs
+#         denom = numpy.inf
+
+#     # cc = numpy.real(numpy.fft.ifft(numpy.fft.fft(s1, fft_sz, axis=0) *
+#     #                                numpy.conj(numpy.fft.fft(s2, fft_sz, axis=0)), axis=0))
+#     # cc = numpy.vstack((cc[-(sz-1):], cc[:sz])) 
+#     # Numba doesn't like axis argument, so use transposing instead. Oh, and also apparently needs object mode...
+#     with objmode(cc='float64[:,:]'):
+#         cc = numpy.real((numpy.fft.ifft(((numpy.fft.fft(s1.T, fft_sz)).T *  numpy.conj((numpy.fft.fft(s2.T, fft_sz))).T).T)).T)
+#     cc = numpy.vstack((cc[-(sz-1):], cc[:sz]))
+
+#     return numpy.real(cc).sum(axis=-1) / denom
+
+# @jit()
+# def cdist_normalized_cc(dataset1, dataset2, norms1, norms2, self_similarity):
+#     #assert dataset1.shape[2] == dataset2.shape[2]
+#     dists = numpy.empty((dataset1.shape[0], dataset2.shape[0]))
+
+#     # if (norms1 < 0.).any(): #For some strange reason numba complains about this block. Since it is unnecessary, can comment out.
+#     # #    norms1 = numpy.linalg.norm(dataset1, axis=(1, 2)) #axis keyword not liked by numba
+#     #     norms1 = numpy.sqrt(numpy.sum((dataset1*dataset1), axis=(1, 2)))
+#     # if (norms2 < 0.).any():
+#     # #    norms2 = numpy.linalg.norm(dataset2, axis=(1, 2)) #axis keyword not liked by numba
+#     #     norms2 = numpy.sqrt(numpy.sum((dataset2*dataset2), axis=(1, 2)))
+
+#     for i in range(dataset1.shape[0]): #~250k - 1 million
+#         for j in range(dataset2.shape[0]): #~100 - 1000
+#             if self_similarity and j < i: #self_similarity always false, could switch it off.
+#                 dists[i, j] = dists[j, i]
+#             elif self_similarity and i == j:
+#                 dists[i, j] = 0.
+#             else:
+#                 dists[i, j] = normalized_cc(dataset1[i], dataset2[j], norm1=norms1[i], norm2=norms2[j]).max()
+#     return dists
+
+
+# @jit()
+# def y_shifted_sbd_vec(ref_ts, dataset, norm_ref, norms_dataset):
+#     #assert dataset.shape[1] == ref_ts.shape[0] and dataset.shape[2] == ref_ts.shape[1]
+#     sz = dataset.shape[1]
+#     dataset_shifted = numpy.zeros((dataset.shape[0], dataset.shape[1], dataset.shape[2]))
+
+#     if norm_ref < 0:
+#         norm_ref = numpy.linalg.norm(ref_ts)
+#     if (norms_dataset < 0.).any():
+#     #    norms_dataset = numpy.linalg.norm(dataset, axis=(1, 2)) #axis keyword not liked by numba
+#         norms_dataset = numpy.sqrt(numpy.sum((dataset*dataset), axis=(1, 2)))
+
+#     for i in range(dataset.shape[0]): #~250k - 1 million
+#         cc = normalized_cc(ref_ts, dataset[i], norm1=norm_ref, norm2=norms_dataset[i])
+#         idx = numpy.argmax(cc)
+#         shift = idx + 1 - sz
+#         if shift > 0:
+#             dataset_shifted[i, shift:] = dataset[i, :-shift, :]
+#         elif shift < 0:
+#             dataset_shifted[i, :shift] = dataset[i, -shift:, :]
+#         else:
+#             dataset_shifted[i] = dataset[i]
+
+#     return dataset_shifted
+
+# # Other parallelization possibilities
+
+from joblib import Parallel, delayed
+
+def normalized_cc(s1, s2, norm1=-1., norm2=-1.):
+    assert s1.shape[1] == s2.shape[1]
+    sz = s1.shape[0] #~100
+    # Compute fft size based on tip from https://stackoverflow.com/questions/14267555/
+    fft_sz = 1 << (2 * sz - 1).bit_length()
+    denom = 0.
+    
+
+    if norm1 < 0.:
+        norm1 = numpy.linalg.norm(s1)
+    if norm2 < 0.:
+        norm2 = numpy.linalg.norm(s2)
+
+    denom = norm1 * norm2
+    if denom < 1e-9:  # To avoid NaNs
+        denom = numpy.inf
+
+    cc = numpy.real(numpy.fft.ifft(numpy.fft.fft(s1, fft_sz, axis=0) *
+                                   numpy.conj(numpy.fft.fft(s2, fft_sz, axis=0)), axis=0))
+    cc = numpy.vstack((cc[-(sz-1):], cc[:sz]))
+    return (numpy.real(cc).sum(axis=-1) / denom)
+
+def do_parallel(dataset1_row, dataset2, norms1_row, norms2):
+    temp = numpy.zeros(dataset2.shape[0])
+    for j in range(dataset2.shape[0]):
+        temp[j] = normalized_cc(dataset1_row, dataset2[j], norms1_row, norms2[j]).max()
+    return(temp)
+
+
+def cdist_normalized_cc(dataset1, dataset2, norms1, norms2, self_similarity): #self_similarity always false, so unused
+    assert dataset1.shape[2] == dataset2.shape[2]
+    dists = numpy.empty((dataset1.shape[0], dataset2.shape[0]))
+
+    if (norms1 < 0.).any():
+        norms1 = numpy.linalg.norm(dataset1, axis=(1, 2))
+    if (norms2 < 0.).any():
+        norms2 = numpy.linalg.norm(dataset2, axis=(1, 2))
+
+    results = Parallel(n_jobs=-1)(delayed(do_parallel)(dataset1[i],dataset2,norms1[i],norms2) for i in range(dataset1.shape[0]))
+    for i in range(dataset1.shape[0]):
+        dists[i] = results[i]
+
+    # results = Parallel()(delayed(normalized_cc)(
+    #     dataset1[i],dataset2[j],norms1[i],norms2[j]) for i in range(dataset1.shape[0]) for j in range(dataset2.shape[0]))
+    
+    # dists = numpy.asarray(results).reshape(dataset1.shape[0],dataset2.shape[0])
+    return dists
+
+
+def y_shifted_sbd_vec(ref_ts, dataset, norm_ref, norms_dataset):
+    assert dataset.shape[1] == ref_ts.shape[0] and dataset.shape[2] == ref_ts.shape[1]
+    sz = dataset.shape[1]
+    dataset_shifted = numpy.zeros((dataset.shape[0], dataset.shape[1], dataset.shape[2]))
+
+    if norm_ref < 0:
+        norm_ref = numpy.linalg.norm(ref_ts)
+    if (norms_dataset < 0.).any():
+        norms_dataset = numpy.linalg.norm(dataset, axis=(1, 2))
+
+    for i in range(dataset.shape[0]): #~250k - 1 million
+        cc = normalized_cc(ref_ts, dataset[i], norm1=norm_ref, norm2=norms_dataset[i])
+        idx = numpy.argmax(cc)
+        shift = idx + 1 - sz
+        if shift > 0:
+            dataset_shifted[i, shift:] = dataset[i, :-shift, :]
+        elif shift < 0:
+            dataset_shifted[i, :shift] = dataset[i, -shift:, :]
+        else:
+            dataset_shifted[i] = dataset[i]
+
+    return dataset_shifted
